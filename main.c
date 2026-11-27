@@ -135,6 +135,11 @@ bool __not_in_flash_func(timer_step)() {
 
   bpm_timer_counter++;
 
+#ifdef INCLUDE_ZEPTOCORE
+  // Commit a pending slice key press (1-16) once the 1/16 grid is reached.
+  key_jump_run_pending();
+#endif
+
   bool do_splice_trigger = (bpm_timer_counter % (banks[sel_bank_cur]
                                                      ->sample[sel_sample_cur]
                                                      .snd[FILEZERO]
