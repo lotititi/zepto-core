@@ -737,7 +737,24 @@ void key_do_jump(uint8_t beat) {
 }
 
 #ifdef INCLUDE_ZEPTOCORE
-void key_do_physical_jump(uint8_t beat) {
+// Slice keys 1-16 are committed on a musical grid. The timer runs at 192 PPQN,
+// so 48 ticks = 1/16 note. Build with -DKEY_JUMP_QUANTIZE_TICKS=0 to restore
+// the previous immediate behaviour.
+#ifndef KEY_JUMP_QUANTIZE_TICKS
+#define KEY_JUMP_QUANTIZE_TICKS 48
+#endif
+#define KEY_JUMP_PENDING_TIMEOUT_US 1000000
+
+// A key press is published by the main loop (writer) and consumed by
+// timer_step() (reader). The sequence counter is written last, so the reader
+// never sees a half-written request.
+volatile uint8_t key_jump_request_beat = 0;
+volatile uint32_t key_jump_request_time = 0;
+volatile uint8_t key_jump_request_seq = 0;
+volatile uint8_t key_jump_done_seq = 0;
+
+// Immediate jump (the original behaviour of key_do_physical_jump).
+void key_do_physical_jump_now(uint8_t beat) {
   if (beat < 16) {
     int32_t slice = floor(beat_current / 16) * 16 + beat;
     if (jump_page_lock > JUMP_PAGE_LOCK_DEFAULT) {
@@ -745,6 +762,46 @@ void key_do_physical_jump(uint8_t beat) {
     }
     key_do_jump_to_slice(slice, beat);
   }
+}
+
+// Slice key 1-16 pressed: wait for the next 1/16 grid tick when playing.
+void key_do_physical_jump(uint8_t beat) {
+  if (beat >= 16) return;
+#if KEY_JUMP_QUANTIZE_TICKS > 1
+  if (!playback_stopped && !do_stop_playback && !do_restart_playback &&
+      fil_is_open) {
+    key_jump_request_beat = beat;
+    key_jump_request_time = time_us_32();
+    key_jump_request_seq++;  // written last: publishes the request
+    return;
+  }
+#endif
+  key_do_physical_jump_now(beat);
+}
+
+// Called from timer_step() on every tick, right after bpm_timer_counter++.
+void key_jump_run_pending() {
+#if KEY_JUMP_QUANTIZE_TICKS > 1
+  uint8_t seq = key_jump_request_seq;
+  if (seq == key_jump_done_seq) return;
+  // Commit on the grid. During a retrigger (2- or 3-key combo) commit at
+  // once so the retrigger repeats the slice of the key that is held.
+  if ((bpm_timer_counter % KEY_JUMP_QUANTIZE_TICKS) != 0 &&
+      retrig_beat_num == 0 && !key3_activated) {
+    return;
+  }
+  uint8_t beat = key_jump_request_beat;
+  uint32_t requested_at = key_jump_request_time;
+  key_jump_done_seq = seq;
+  if ((uint32_t)(time_us_32() - requested_at) > KEY_JUMP_PENDING_TIMEOUT_US) {
+    return;  // stale request (e.g. timer was blocked), drop it
+  }
+  debounce_quantize = 2;
+  key_do_physical_jump_now(beat);
+  dub_step_break = 0;
+  dub_step_divider = 0;
+  dub_step_beat = beat_current;
+#endif
 }
 #endif
 
